@@ -93,27 +93,267 @@
 
   * タイトル、対象文の冒頭表示、「削除」「キャンセル」
 
-6. API/外部サービス（想定）
+6. 技術スタック・アーキテクチャ
 
-* LLM推論API（英語例文生成・解説）
-* TTS API（英語音声：US/UK少なくとも1種）
-* 認証基盤（Auth/SaaS）※MVPはメール+パスワード
-* データベース：ユーザー/ブックマーク/履歴（RDB or SaaS）
+* フロントエンド
+  * Next.js 14 (App Router)：React フレームワーク、SSR/SSG 対応
+  * TypeScript：型安全な開発
+  * Tailwind CSS：レスポンシブ UI
+  * PWA 対応：モバイル体験向上
+* バックエンド・インフラ
+  * Vercel：ホスティング・デプロイメント、Edge Functions
+  * Supabase：認証・データベース・リアルタイム機能
+    * PostgreSQL：ユーザー/ブックマーク/履歴データ
+    * Auth：Email/Password 認証、JWT ベース
+    * Row Level Security：ユーザーデータ保護
+* AI・音声処理
+  * AI SDK (Vercel)：LLM API 統合（OpenAI/Anthropic）
+  * Web Speech API：ブラウザ内 TTS（フォールバック）
+  * ElevenLabs TTS API：高品質音声（メイン）
+* 状態管理・UI
+  * Zustand：軽量状態管理
+  * React Hook Form：フォーム処理
+  * Radix UI：アクセシブル UI コンポーネント
+* 監視・分析
+  * Vercel Analytics：パフォーマンス監視
+  * Supabase Dashboard：DB 監視・ログ
 
-7. データモデル（最小）
+7. アーキテクチャ詳細
 
-* User{id, email, password\_hash, created\_at}
-* Message{id, user\_id, role(user/ai), text, created\_at, session\_id}
-* Bookmark{id, user\_id, text\_en, text\_ja(optional), notes(optional), created\_at, last\_played\_at}
-* Session{id, user\_id, created\_at, title(optional)}
+* デプロイメント構成
+  * Vercel Edge Network：グローバル CDN
+  * Edge Functions：リアルタイム AI 応答
+  * Supabase (AWS ap-northeast-1)：データ永続化
+* 認証フロー
+  * Supabase Auth → JWT → Row Level Security
+  * 匿名ユーザー → 後で Email 昇格可能
+* データフロー
+  * ユーザー入力 → Edge Function → AI SDK → LLM API
+  * 生成結果 → クライアント → Supabase (保存)
+  * ブックマーク → Supabase RLS → ユーザー専用データ
 
-10. スコープ外（将来拡張）
+8. API/外部サービス統合
+
+* AI 推論
+  * Vercel AI SDK 経由で OpenAI GPT-4 または Anthropic Claude
+  * プロンプト管理：英語例文生成・解説特化
+  * レート制限・コスト管理：Vercel 制限準拠
+* 音声合成
+  * ElevenLabs TTS API：ネイティブ品質音声（US/UK）
+  * Web Speech API：ブラウザフォールバック
+  * 音声キャッシュ：Vercel Blob Storage
+* データベース
+  * Supabase PostgreSQL：リレーショナルデータ
+  * リアルタイム：ブックマーク同期（複数デバイス）
+  * バックアップ：Supabase 自動バックアップ
+
+9. データモデル（Supabase）
+
+```sql
+-- Users テーブル（Supabase Auth 連携）
+CREATE TABLE users (
+  id UUID PRIMARY KEY DEFAULT auth.uid(),
+  email TEXT UNIQUE,
+  display_name TEXT,
+  preferences JSONB DEFAULT '{}',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Sessions テーブル（チャット履歴管理）
+CREATE TABLE sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Messages テーブル（対話履歴）
+CREATE TABLE messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT CHECK (role IN ('user', 'assistant')) NOT NULL,
+  content TEXT NOT NULL,
+  metadata JSONB DEFAULT '{}', -- 学習レベル、生成パラメータ等
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Bookmarks テーブル（学習素材保存）
+CREATE TABLE bookmarks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
+  text_en TEXT NOT NULL,
+  text_ja TEXT,
+  notes TEXT,
+  audio_url TEXT, -- ElevenLabs/キャッシュ音声URL
+  play_count INTEGER DEFAULT 0,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  last_played_at TIMESTAMP WITH TIME ZONE
+);
+
+-- RLS (Row Level Security) ポリシー
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bookmarks ENABLE ROW LEVEL SECURITY;
+
+-- ユーザーは自分のデータのみアクセス可能
+CREATE POLICY "Users can access own data" ON users FOR ALL USING (auth.uid() = id);
+CREATE POLICY "Users can access own sessions" ON sessions FOR ALL USING (auth.uid() = user_id);
+CREATE POLICY "Users can access own messages" ON messages FOR ALL USING (auth.uid() = user_id);
+CREATE POLICY "Users can access own bookmarks" ON bookmarks FOR ALL USING (auth.uid() = user_id);
+```
+
+10. 開発・デプロイメント環境
+
+* 開発環境
+  * Next.js Dev Server：ローカル開発
+  * Supabase CLI：ローカル DB・認証エミュレート
+  * pnpm：パッケージ管理
+  * ESLint + Prettier：コード品質
+  * Husky + lint-staged：pre-commit チェック
+* ステージング
+  * Vercel Preview：PR 毎の自動デプロイ
+  * Supabase Staging：本番分離環境
+  * Cypress：E2E テスト自動実行
+* 本番環境
+  * Vercel Production：独自ドメイン
+  * Supabase Production：本番 DB
+  * Vercel Analytics：リアルタイム監視
+  * Sentry：エラー追跡
+* CI/CD パイプライン
+  * GitHub Actions：テスト・リント・型チェック
+  * Vercel Git Integration：自動デプロイ
+  * Database Migration：Supabase CLI 経由
+
+11. パフォーマンス最適化
+
+* フロントエンド
+  * Next.js App Router：コンポーネント分割・遅延読み込み
+  * SWR/React Query：データキャッシュ・同期
+  * Bundle Analyzer：JS バンドルサイズ監視
+  * Web Vitals：Core Web Vitals 測定
+* API・データベース
+  * Vercel Edge Functions：地理的分散
+  * Supabase Connection Pooling：DB 接続効率化
+  * Redis（Upstash）：頻繁アクセスデータキャッシュ
+  * AI 応答ストリーミング：逐次表示でUX向上
+
+12. セキュリティ実装
+
+* 認証・認可
+  * Supabase Auth：Email確認・パスワードリセット
+  * JWT 自動更新：セッション管理
+  * Rate Limiting：API 乱用防止（Vercel）
+* データ保護
+  * HTTPS 強制：Vercel 標準
+  * RLS：データベースレベルアクセス制御
+  * Input Sanitization：XSS 防止
+  * AI プロンプト検証：インジェクション対策
+
+13. プロジェクト構成・ファイル構造
+
+```
+practice-english-chat/
+├── src/
+│   ├── app/                    # Next.js App Router
+│   │   ├── (auth)/            # 認証ページグループ
+│   │   ├── chat/              # チャット画面
+│   │   ├── bookmarks/         # ブックマーク一覧
+│   │   ├── api/               # API Routes
+│   │   │   ├── chat/          # AI チャット API
+│   │   │   ├── tts/           # 音声合成 API
+│   │   │   └── bookmarks/     # ブックマーク操作
+│   │   ├── globals.css
+│   │   ├── layout.tsx
+│   │   └── page.tsx
+│   ├── components/            # UI コンポーネント
+│   │   ├── ui/               # 基本 UI (shadcn/ui)
+│   │   ├── chat/             # チャット関連
+│   │   ├── bookmark/         # ブックマーク関連
+│   │   └── audio/            # 音声再生関連
+│   ├── lib/                  # ユーティリティ
+│   │   ├── supabase/         # Supabase クライアント
+│   │   ├── ai/               # AI SDK 設定
+│   │   ├── audio/            # TTS 統合
+│   │   └── utils.ts
+│   ├── types/                # TypeScript 型定義
+│   ├── hooks/                # カスタムフック
+│   └── store/                # Zustand ストア
+├── supabase/                 # Supabase 設定
+│   ├── migrations/           # DB マイグレーション
+│   ├── seed.sql             # 初期データ
+│   └── config.toml
+├── public/                   # 静的ファイル
+├── .env.local               # 環境変数
+├── .env.example
+├── next.config.js
+├── tailwind.config.js
+├── tsconfig.json
+├── package.json
+└── README.md
+```
+
+14. 環境変数・設定
+
+```bash
+# .env.local (本番では Vercel Environment Variables)
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+
+# AI Provider (OpenAI または Anthropic)
+OPENAI_API_KEY=your_openai_key
+ANTHROPIC_API_KEY=your_anthropic_key
+
+# TTS サービス
+ELEVENLABS_API_KEY=your_elevenlabs_key
+
+# 監視・分析
+SENTRY_DSN=your_sentry_dsn
+VERCEL_ANALYTICS_ID=your_analytics_id
+```
+
+15. 依存関係（主要パッケージ）
+
+```json
+{
+  "dependencies": {
+    "next": "^14.0.0",
+    "react": "^18.0.0",
+    "typescript": "^5.0.0",
+    "@supabase/supabase-js": "^2.38.0",
+    "@supabase/auth-helpers-nextjs": "^0.8.0",
+    "ai": "^2.2.0",
+    "@radix-ui/react-dialog": "^1.0.0",
+    "@radix-ui/react-toast": "^1.1.0",
+    "zustand": "^4.4.0",
+    "react-hook-form": "^7.47.0",
+    "tailwindcss": "^3.3.0",
+    "lucide-react": "^0.290.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "eslint": "^8.50.0",
+    "prettier": "^3.0.0",
+    "cypress": "^13.0.0",
+    "husky": "^8.0.0",
+    "lint-staged": "^15.0.0"
+  }
+}
+```
+
+16. スコープ外（将来拡張）
 
 * 発話録音→発音評価、長期カリキュラム生成、復習スケジューラ（SRS）
 * レベル自動判定の高精度化、画像入力、オフライン再生、ネイティブアプリ
 * 教師ダッシュボード、多言語学習対応
 
-11. 受け入れ条件（抜粋）
+17. 受け入れ条件（抜粋）
 
 * ユーザーが任意のテーマを送信すると、3つの英語メッセージが別々の吹き出しで表示される
 * 各吹き出しの音声アイコンで該当英語文が再生できる
